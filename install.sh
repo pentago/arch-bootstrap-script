@@ -242,6 +242,21 @@ initrd /initramfs-linux.img
 options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw resume=UUID=${SWAP_UUID} ${EXTRA_CMDLINE}
 EOF
 
+# Arch ISO boot entry
+curl -L -o /boot/archlinux-x86_64.iso https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+mkdir -p /tmp/archiso
+mount -o loop /boot/archlinux-x86_64.iso /tmp/archiso
+cp /tmp/archiso/arch/boot/x86_64/vmlinuz-linux /boot/vmlinuz-linux-archiso
+cp /tmp/archiso/arch/boot/x86_64/initramfs-linux.img /boot/initramfs-linux-archiso.img
+umount /tmp/archiso
+
+cat > /boot/loader/entries/archiso.conf <<EOF
+title Arch Linux ISO
+linux /vmlinuz-linux-archiso
+initrd /initramfs-linux-archiso.img
+options img_dev=/dev/disk/by-label/BOOT img_loop=/archlinux-x86_64.iso earlymodules=loop
+EOF
+
 # Enable NetworkManager
 systemctl enable NetworkManager
 

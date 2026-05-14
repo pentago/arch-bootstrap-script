@@ -113,6 +113,10 @@ timedatectl set-ntp true
 # ---------------------------------------------------------------------------
 echo "==> Partitioning $DISK"
 
+swapoff "$SWAP_PART" 2>/dev/null || true
+umount -R /mnt 2>/dev/null || true
+cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
+
 # Delete existing Linux partitions (5+) and create new ones
 sgdisk -d 5 -d 6 "$DISK" 2>/dev/null || true
 # Also try deleting p7 in case it exists from a previous run

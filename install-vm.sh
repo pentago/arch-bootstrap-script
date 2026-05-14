@@ -127,6 +127,10 @@ timedatectl set-ntp true
 # ---------------------------------------------------------------------------
 echo "==> Partitioning $DISK"
 
+swapoff "$SWAP_PART" 2>/dev/null || true
+umount -R /mnt 2>/dev/null || true
+cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
+
 sgdisk -Z "$DISK"
 
 sgdisk \

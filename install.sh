@@ -195,6 +195,8 @@ echo "==> Configuring system in chroot"
 # Get the LUKS UUID for kernel cmdline
 LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+[[ -z "$LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $ROOT_PART"; exit 1; }
+[[ -z "$SWAP_UUID" ]] && { echo "ERROR: Failed to get swap UUID for $SWAP_PART"; exit 1; }
 
 arch-chroot /mnt /bin/bash -e <<CHROOT
 # Timezone
@@ -239,22 +241,7 @@ title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw resume=UUID=${SWAP_UUID} ${EXTRA_CMDLINE}
-EOF
-
-# Arch ISO boot entry
-curl -L -o /boot/archlinux-x86_64.iso https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
-mkdir -p /tmp/archiso
-mount -o loop /boot/archlinux-x86_64.iso /tmp/archiso
-cp /tmp/archiso/arch/boot/x86_64/vmlinuz-linux /boot/vmlinuz-linux-archiso
-cp /tmp/archiso/arch/boot/x86_64/initramfs-linux.img /boot/initramfs-linux-archiso.img
-umount /tmp/archiso
-
-cat > /boot/loader/entries/archiso.conf <<EOF
-title Arch Linux ISO
-linux /vmlinuz-linux-archiso
-initrd /initramfs-linux-archiso.img
-options img_dev=/dev/disk/by-label/BOOT img_loop=/archlinux-x86_64.iso earlymodules=loop
+options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw resume=UUID=${SWAP_UUID}${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
 EOF
 
 # Enable NetworkManager
@@ -283,6 +270,24 @@ pacman -U --noconfirm /tmp/paru/paru-*.pkg.tar.zst
 rm -rf /tmp/paru
 su - ${USER_NAME} -c 'paru -S --noconfirm aconfmgr-git'
 PARU
+
+# ---------------------------------------------------------------------------
+# Arch ISO boot entry
+# ---------------------------------------------------------------------------
+echo "==> Adding Arch ISO boot entry"
+curl -L -# -o /mnt/boot/archlinux-x86_64.iso https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+mkdir -p /tmp/archiso
+mount -o loop /mnt/boot/archlinux-x86_64.iso /tmp/archiso
+cp /tmp/archiso/arch/boot/x86_64/vmlinuz-linux /mnt/boot/vmlinuz-linux-archiso
+cp /tmp/archiso/arch/boot/x86_64/initramfs-linux.img /mnt/boot/initramfs-linux-archiso.img
+umount /tmp/archiso
+
+cat > /mnt/boot/loader/entries/archiso.conf <<EOF
+title Arch Linux ISO
+linux /vmlinuz-linux-archiso
+initrd /initramfs-linux-archiso.img
+options img_dev=/dev/disk/by-label/BOOT img_loop=/archlinux-x86_64.iso earlymodules=loop
+EOF
 
 # ---------------------------------------------------------------------------
 # Done

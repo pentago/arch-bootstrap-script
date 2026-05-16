@@ -6,7 +6,7 @@
 #   p1     — 512M  EFI System Partition (FAT32)    → /efi
 #   p2     — 2G    XBOOTLDR (FAT32, label BOOT)   → /boot
 #   p3     — rest  LUKS2 → ext4 (label ROOT)       → /
-#   p4     — 4G    Linux swap                      → swap
+#   p4     — 1G    Linux swap                      → swap
 #
 # Bootloader: systemd-boot (ESP at p1 /efi, XBOOTLDR at p2 /boot)
 # Encryption: LUKS2 aes-xts-plain64 (passphrase only)
@@ -26,7 +26,7 @@ CRYPT_NAME=cryptroot
 ESP_SIZE=512M
 BOOT_SIZE=2G
 SWAP_SIZE=1G
-HOSTNAME=workstation
+HOSTNAME=archvm
 TIMEZONE=Europe/Belgrade
 LOCALE=en_US.UTF-8
 VCONSOLE_FONT=ter-132n
@@ -140,6 +140,7 @@ echo "==> Partitioning $DISK"
 
 swapoff "$SWAP_PART" 2>/dev/null || true
 umount -R /mnt 2>/dev/null || true
+umount /tmp/archiso 2>/dev/null || true
 cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
 
 sgdisk -Z "$DISK"
@@ -285,6 +286,9 @@ PARU
 # ---------------------------------------------------------------------------
 echo "==> Adding Arch ISO boot entry"
 curl -L -# -o /mnt/boot/archlinux-x86_64.iso https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+curl -L -# -o /mnt/boot/archlinux-x86_64.iso.sig https://archlinux.org/iso/latest/archlinux-x86_64.iso.sig
+pacman-key -v /mnt/boot/archlinux-x86_64.iso.sig
+rm /mnt/boot/archlinux-x86_64.iso.sig
 mkdir -p /tmp/archiso
 mount -o loop /mnt/boot/archlinux-x86_64.iso /tmp/archiso
 cp /tmp/archiso/arch/boot/x86_64/vmlinuz-linux /mnt/boot/vmlinuz-linux-archiso

@@ -126,6 +126,7 @@ echo "==> Partitioning $DISK"
 
 swapoff "$SWAP_PART" 2>/dev/null || true
 umount -R /mnt 2>/dev/null || true
+umount /tmp/archiso 2>/dev/null || true
 cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
 
 # Delete existing Linux partitions (5+) and create new ones
@@ -287,6 +288,9 @@ PARU
 # ---------------------------------------------------------------------------
 echo "==> Adding Arch ISO boot entry"
 curl -L -# -o /mnt/boot/archlinux-x86_64.iso https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+curl -L -# -o /mnt/boot/archlinux-x86_64.iso.sig https://archlinux.org/iso/latest/archlinux-x86_64.iso.sig
+pacman-key -v /mnt/boot/archlinux-x86_64.iso.sig
+rm /mnt/boot/archlinux-x86_64.iso.sig
 mkdir -p /tmp/archiso
 mount -o loop /mnt/boot/archlinux-x86_64.iso /tmp/archiso
 cp /tmp/archiso/arch/boot/x86_64/vmlinuz-linux /mnt/boot/vmlinuz-linux-archiso

@@ -50,12 +50,23 @@ PKGS=(
   terminus-font
   openssh
   sudo
+  atuin
+  bat
+  btop
+  direnv
+  fd
+  fzf
   git
-  rust
+  lazygit
   neovim
-  zsh
+  ripgrep
+  rust
   tmux
   yazi
+  zoxide
+  zsh
+  7zip
+  ntfs-3g
 )
 
 # ---------------------------------------------------------------------------

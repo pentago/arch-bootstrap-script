@@ -43,26 +43,37 @@ USER_SHELL=/bin/zsh
 EXTRA_CMDLINE=""
 
 PKGS=(
-    base
-    base-devel
-    linux
-    linux-headers
-    linux-firmware
-    amd-ucode
-    dosfstools
-    efibootmgr
-    gptfdisk
-    cryptsetup
-    networkmanager
-    terminus-font
-    openssh
-    sudo
-    git
-    rust
-    neovim
-    zsh
-    tmux
-    yazi
+  base
+  base-devel
+  linux
+  linux-headers
+  linux-firmware
+  amd-ucode
+  dosfstools
+  efibootmgr
+  gptfdisk
+  cryptsetup
+  networkmanager
+  terminus-font
+  openssh
+  sudo
+  atuin
+  bat
+  btop
+  direnv
+  fd
+  fzf
+  git
+  lazygit
+  neovim
+  ripgrep
+  rust
+  tmux
+  yazi
+  zoxide
+  zsh
+  7zip
+  ntfs-3g
 )
 
 # ---------------------------------------------------------------------------

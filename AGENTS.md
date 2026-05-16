@@ -2,11 +2,10 @@
 
 ## Purpose
 
-Two scripts automate Arch Linux installation up to the point where `aconfmgr apply` takes over full system configuration. A third script adds an Arch ISO recovery boot entry independently.
+Two scripts automate Arch Linux installation up to the point where `aconfmgr apply` takes over full system configuration. Both scripts also drop an Arch ISO recovery boot entry into `/boot` as their final step.
 
 - `install.sh` — real workstation (dual-boot Windows, nvme0n1)
 - `install-vm.sh` — VM test variant (full disk wipe, /dev/vda)
-- `add-archiso-boot.sh` — standalone: downloads Arch ISO to /boot and creates a systemd-boot entry for it
 
 ## Scripts
 
@@ -39,10 +38,6 @@ Differences from main script:
 - Enables sshd with `PermitRootLogin yes` for testing
 - No YubiKey/FIDO2 instructions in post-install output
 - Needs 4G+ RAM for paru source build (LTO link is memory-hungry)
-
-### add-archiso-boot.sh
-
-Downloads the latest Arch ISO to `/boot`, extracts kernel/initramfs, and writes an `archiso.conf` boot entry. Can be run on any existing system with systemd-boot and a BOOT partition.
 
 ## Design constraints
 

@@ -22,7 +22,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DISK=/dev/sda
+DISK=/dev/nvme0n1
 
 BOOT_SIZE=5G
 ROOT_SIZE=150G
@@ -350,12 +350,6 @@ pacman -U --noconfirm /tmp/paru/paru-*.pkg.tar.zst
 rm -rf /tmp/paru
 PARU
 
-# paru needs sudo to install the built package, which prompts for
-# ${USER_NAME}'s password — this must run outside the heredoc above so it
-# gets the real terminal instead of the (already-consumed) heredoc stdin.
-echo "==> Installing aconfmgr (enter ${USER_NAME}'s password when prompted)"
-arch-chroot /mnt su - ${USER_NAME} -c 'paru -S --noconfirm aconfmgr-git'
-
 # ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
@@ -368,8 +362,9 @@ echo "Next steps:"
 echo "  1. umount -R /mnt"
 echo "  2. reboot"
 echo "  3. Log in as ${USER_NAME}"
-echo "  4. Clone your aconfmgr config: git clone <your-repo> ~/git/personal/aconfmgr"
-echo "  4a. ln -sf ~/git/personal/aconfmgr ~/.config/aconfmgr"
+echo "  4. Install aconfmgr: paru -S aconfmgr-git"
+echo "  5. Clone your aconfmgr config: git clone <your-repo> ~/git/personal/aconfmgr"
+echo "  5a. ln -sf ~/git/personal/aconfmgr ~/.config/aconfmgr"
 echo ""
 echo "  Before running 'aconfmgr apply', sync machine-specific files into the repo:"
 echo ""

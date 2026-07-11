@@ -58,6 +58,7 @@ Key traits:
 - **initramfs uses systemd hooks** (`sd-encrypt`, `sd-vconsole`) not busybox (`encrypt`).
 - **sudoers via drop-in** (`/etc/sudoers.d/wheel`), never edit `/etc/sudoers` directly.
 - **paru built from source** — `paru-bin` links against specific `libalpm.so` version that mismatches on newer ISOs. `rust` is in PKGS for this reason.
+- **aconfmgr-git is NOT installed by the script** — only paru itself gets built/installed. Installing aconfmgr-git via paru needs sudo, which needs a real password prompt; that kept failing to read `${USER_NAME}`'s password reliably from inside `arch-chroot` in this environment (even run directly, outside any heredoc — see git history for the two failed attempts). Post-install instructions tell the user to run `paru -S aconfmgr-git` themselves after first login, where an interactive sudo prompt actually works.
 - **Interactive commands outside heredocs** — `passwd`, `makepkg -si`, and anything needing stdin must run as separate `arch-chroot` calls, not inside `<<HEREDOC` blocks.
 - **Pre-partition cleanup** — both scripts swapoff, umount `/mnt`, and close any open LUKS before partitioning, so they can be re-run safely.
 - **ISO boot entry outside chroot** — the Arch ISO download, extraction, and boot entry creation operate on `/mnt/boot/` directly from the live environment, not inside a chroot heredoc.
@@ -83,4 +84,4 @@ aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the 
 - These scripts run from a live Arch ISO as root. They will never be linted or type-checked.
 - Section divider comments are intentional — the scripts are read linearly during a manual install.
 - Test changes by reading the script, not by running it (destructive).
-- Keep both scripts in sync for shared logic (LUKS setup, mkinitcpio hooks, bootctl flags, fstab fixups, chroot config, paru/aconfmgr install, post-install instructions).
+- Keep both scripts in sync for shared logic (LUKS setup, mkinitcpio hooks, bootctl flags, fstab fixups, chroot config, paru install, post-install instructions).

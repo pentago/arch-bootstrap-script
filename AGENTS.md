@@ -21,11 +21,11 @@ All sizes are config variables at the top. `/home` is elastic via sgdisk negativ
 
 Key traits:
 - Disk-agnostic: derives `p`-vs-no-`p` suffix from whether `$DISK` ends in a digit
-- Same LUKS passphrase for all three data volumes. root unlocks via `rd.luks.name` on the kernel cmdline; home/swap unlock via `/etc/crypttab.initramfs`, which `sd-encrypt` auto-embeds into the initramfs — all three are processed in the same initrd systemd session, so kernel-keyring password caching can skip re-prompting for the repeat entries
+- Same LUKS passphrase for all three data volumes. All three unlock via `rd.luks.name=<UUID>=<name>` on the kernel cmdline (one param per device: cryptroot, crypthome, cryptswap) — a single proven mechanism, not split across kernel params + `/etc/crypttab.initramfs`. All three are processed in the same initrd systemd session, so kernel-keyring password caching can skip re-prompting for the repeat entries
 - `bootctl --esp-path=/boot install` (single ESP, no XBOOTLDR)
 - No `resume=` in arch.conf (suspend-only, no hibernation)
 - No ISO boot entry section (removed on rewrite)
-- blkid not guarded (no `[[ -z "$UUID" ]]` check — contrast with install-vm.sh)
+- blkid guarded for all three LUKS UUIDs (root/home/swap) — an empty UUID would silently produce a broken `rd.luks.name=` param and home/swap would never unlock, with no error at install time
 
 ### install-vm.sh (VM testing)
 
@@ -58,7 +58,7 @@ Key traits:
 - **Interactive commands outside heredocs** — `passwd`, `makepkg -si`, and anything needing stdin must run as separate `arch-chroot` calls, not inside `<<HEREDOC` blocks.
 - **Pre-partition cleanup** — both scripts swapoff, umount `/mnt`, and close any open LUKS before partitioning, so they can be re-run safely.
 - **ISO boot entry outside chroot** — the Arch ISO download, extraction, and boot entry creation operate on `/mnt/boot/` directly from the live environment, not inside a chroot heredoc.
-- **blkid guarded** — (install-vm.sh only) UUID extraction aborts with a clear error if blkid returns empty.
+- **blkid guarded** — UUID extraction aborts with a clear error if blkid returns empty (both scripts).
 
 ## aconfmgr integration
 
@@ -68,9 +68,8 @@ The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific file
 |------|-----|-----|
 | `/etc/fstab` | New UUIDs, swap partition instead of old swapfile | `cp /etc/fstab` |
 | `/etc/machine-id` | Must be unique per install | `cp /etc/machine-id` |
-| `/etc/crypttab.initramfs` | swap + home LUKS UUIDs (install.sh only; root stays on `rd.luks.name` kernel cmdline) | `cp /etc/crypttab.initramfs` (written during install, `sd-encrypt` auto-embeds it) |
 | `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` | New UIDs and password hashes | `cp /etc/{passwd,shadow,group,gshadow}` |
-| `/boot/loader/entries/arch.conf` | LUKS UUID for root | `sed` the UUIDs |
+| `/boot/loader/entries/arch.conf` | LUKS UUIDs (root always; home + swap too on install.sh) | `sed` each `rd.luks.name=...=<name>` param by name |
 
 aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the rest of `arch.conf` (nvidia kernel params) — these are fine to overwrite since aconfmgr installs nvidia packages first.
 

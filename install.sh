@@ -246,6 +246,9 @@ echo "==> Configuring system in chroot"
 LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
 HOME_LUKS_UUID=$(blkid -s UUID -o value "$HOME_PART")
 SWAP_LUKS_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+[[ -z "$LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $ROOT_PART"; exit 1; }
+[[ -z "$HOME_LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $HOME_PART"; exit 1; }
+[[ -z "$SWAP_LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $SWAP_PART"; exit 1; }
 
 arch-chroot /mnt /bin/bash -e <<CHROOT
 ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
@@ -266,13 +269,6 @@ FILES=()
 HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)
 MKINIT
 
-# sd-encrypt auto-embeds this file into the initramfs, so home/swap unlock
-# in the same boot session as root (root itself stays on rd.luks.name below).
-cat > /etc/crypttab.initramfs <<CRYPTTAB
-crypthome UUID=${HOME_LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
-cryptswap UUID=${SWAP_LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
-CRYPTTAB
-
 mkinitcpio -P
 
 bootctl --esp-path=/boot install
@@ -289,7 +285,7 @@ title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
+options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} rd.luks.name=${HOME_LUKS_UUID}=crypthome rd.luks.name=${SWAP_LUKS_UUID}=cryptswap root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
 EOF
 
 systemctl enable NetworkManager
@@ -342,11 +338,12 @@ echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
 echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
 echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
 echo ""
-echo "    # crypttab.initramfs — home + swap entries were already written during install"
-echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
-echo ""
-echo " # arch.conf — update LUKS UUID for this install"
-echo "    sed -i 's/rd.luks.name=[^ ]*/rd.luks.name='\$(blkid -s UUID -o value ${ROOT_PART})'=cryptroot/' \\"
+echo "    # arch.conf — update the root/home/swap LUKS UUIDs for this install"
+echo "    sed -i \"s|rd.luks.name=[^=]*=cryptroot|rd.luks.name=\$(blkid -s UUID -o value ${ROOT_PART})=cryptroot|\" \\"
+echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
+echo "    sed -i \"s|rd.luks.name=[^=]*=crypthome|rd.luks.name=\$(blkid -s UUID -o value ${HOME_PART})=crypthome|\" \\"
+echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
+echo "    sed -i \"s|rd.luks.name=[^=]*=cryptswap|rd.luks.name=\$(blkid -s UUID -o value ${SWAP_PART})=cryptswap|\" \\"
 echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
 echo ""
 echo "    cd ~/.config/aconfmgr && git add -A && git commit -m 'sync for fresh install'"

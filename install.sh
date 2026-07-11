@@ -285,15 +285,24 @@ FILES=()
 HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)
 MKINIT
 
-mkinitcpio -P
+# Root unlocks in the initramfs: sd-encrypt embeds crypttab.initramfs as
+# /etc/crypttab inside the initramfs image, prompting for the passphrase
+# before switch-root. No rd.luks.name kernel param needed (and using one
+# here would make the generator ignore any crypttab entry not also named
+# on the cmdline — that's what silently broke home/swap unlock earlier).
+cat > /etc/crypttab.initramfs <<CRYPTTAB
+cryptroot UUID=${LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
+CRYPTTAB
 
-# home/swap unlock automatically via keyfile once root is mounted (see
-# /etc/cryptsetup-keys.d) — no separate prompt, no initramfs involvement.
+# home/swap unlock automatically via keyfile once real root is mounted,
+# via the regular (non-initramfs) systemd instance — see /etc/cryptsetup-keys.d.
 cat > /etc/crypttab <<CRYPTTAB
 crypthome UUID=${HOME_LUKS_UUID} /etc/cryptsetup-keys.d/home.key
 cryptswap UUID=${SWAP_LUKS_UUID} /etc/cryptsetup-keys.d/swap.key
 CRYPTTAB
-chmod 600 /etc/crypttab
+chmod 600 /etc/crypttab.initramfs /etc/crypttab
+
+mkinitcpio -P
 
 bootctl --esp-path=/boot install
 
@@ -309,7 +318,7 @@ title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
+options root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
 EOF
 
 systemctl enable NetworkManager
@@ -362,13 +371,11 @@ echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
 echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
 echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
 echo ""
-echo "    # arch.conf — update the root LUKS UUID for this install"
-echo "    sed -i \"s|rd.luks.name=[^=]*=cryptroot|rd.luks.name=\$(blkid -s UUID -o value ${ROOT_PART})=cryptroot|\" \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
-echo ""
-echo "    # crypttab + keyfiles for home/swap — sensitive, same trust level as /etc/shadow above."
-echo "    # Already correct for this install, just copy them in as-is (no UUID templating needed)."
+echo "    # crypttab.initramfs (root), crypttab + keyfiles (home/swap) — sensitive,"
+echo "    # same trust level as /etc/shadow above. Already correct for this install,"
+echo "    # just copy them in as-is (no UUID templating needed; arch.conf has none anymore)."
 echo "    mkdir -p ~/.config/aconfmgr/files/etc/cryptsetup-keys.d"
+echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
 echo "    cp /etc/crypttab ~/.config/aconfmgr/files/etc/crypttab"
 echo "    cp /etc/cryptsetup-keys.d/home.key /etc/cryptsetup-keys.d/swap.key ~/.config/aconfmgr/files/etc/cryptsetup-keys.d/"
 echo ""

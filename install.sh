@@ -282,12 +282,7 @@ echo "FONT=${VCONSOLE_FONT}" > /etc/vconsole.conf
 
 echo "${HOSTNAME}" > /etc/hostname
 
-cat > /etc/mkinitcpio.conf <<'MKINIT'
-MODULES=()
-BINARIES=()
-FILES=()
-HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)
-MKINIT
+sed -i '/^HOOKS=/c\HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)' /etc/mkinitcpio.conf
 
 # Root unlocks in the initramfs: sd-encrypt embeds crypttab.initramfs as
 # /etc/crypttab inside the initramfs image, prompting for the passphrase

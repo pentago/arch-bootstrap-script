@@ -272,14 +272,19 @@ echo "root:${ROOT_PASS}" | arch-chroot /mnt chpasswd
 echo "==> Setting password for ${USER_NAME}"
 echo "${USER_NAME}:${USER_PASS}" | arch-chroot /mnt chpasswd
 
-echo "==> Installing paru and aconfmgr"
+echo "==> Installing paru"
 arch-chroot /mnt /bin/bash -e <<PARU
 cd /tmp
 su - ${USER_NAME} -c 'cd /tmp && git clone https://aur.archlinux.org/paru.git && cd paru && makepkg --noconfirm'
 pacman -U --noconfirm /tmp/paru/paru-*.pkg.tar.zst
 rm -rf /tmp/paru
-su - ${USER_NAME} -c 'paru -S --noconfirm aconfmgr-git'
 PARU
+
+# paru needs sudo to install the built package, which prompts for
+# ${USER_NAME}'s password — this must run outside the heredoc above so it
+# gets the real terminal instead of the (already-consumed) heredoc stdin.
+echo "==> Installing aconfmgr (enter ${USER_NAME}'s password when prompted)"
+arch-chroot /mnt su - ${USER_NAME} -c 'paru -S --noconfirm aconfmgr-git'
 
 # ---------------------------------------------------------------------------
 # Arch ISO boot entry

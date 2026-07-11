@@ -21,7 +21,7 @@ All sizes are config variables at the top. `/home` is elastic via sgdisk negativ
 
 Key traits:
 - Disk-agnostic: derives `p`-vs-no-`p` suffix from whether `$DISK` ends in a digit
-- Same LUKS passphrase for all three data volumes; single prompt at boot (kernel keyring caching)
+- Same LUKS passphrase for all three data volumes. root unlocks via `rd.luks.name` on the kernel cmdline; home/swap unlock via `/etc/crypttab.initramfs`, which `sd-encrypt` auto-embeds into the initramfs — all three are processed in the same initrd systemd session, so kernel-keyring password caching can skip re-prompting for the repeat entries
 - `bootctl --esp-path=/boot install` (single ESP, no XBOOTLDR)
 - No `resume=` in arch.conf (suspend-only, no hibernation)
 - No ISO boot entry section (removed on rewrite)
@@ -68,7 +68,7 @@ The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific file
 |------|-----|-----|
 | `/etc/fstab` | New UUIDs, swap partition instead of old swapfile | `cp /etc/fstab` |
 | `/etc/machine-id` | Must be unique per install | `cp /etc/machine-id` |
-| `/etc/crypttab.initramfs` | LUKS UUIDs: root (both scripts), swap + home (install.sh only) | Generate with `echo` + `blkid` |
+| `/etc/crypttab.initramfs` | swap + home LUKS UUIDs (install.sh only; root stays on `rd.luks.name` kernel cmdline) | `cp /etc/crypttab.initramfs` (written during install, `sd-encrypt` auto-embeds it) |
 | `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` | New UIDs and password hashes | `cp /etc/{passwd,shadow,group,gshadow}` |
 | `/boot/loader/entries/arch.conf` | LUKS UUID for root | `sed` the UUIDs |
 

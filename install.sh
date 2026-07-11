@@ -244,6 +244,8 @@ sed -i '/\/boot/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
 echo "==> Configuring system in chroot"
 
 LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+HOME_LUKS_UUID=$(blkid -s UUID -o value "$HOME_PART")
+SWAP_LUKS_UUID=$(blkid -s UUID -o value "$SWAP_PART")
 
 arch-chroot /mnt /bin/bash -e <<CHROOT
 ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
@@ -263,6 +265,13 @@ BINARIES=()
 FILES=()
 HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)
 MKINIT
+
+# sd-encrypt auto-embeds this file into the initramfs, so home/swap unlock
+# in the same boot session as root (root itself stays on rd.luks.name below).
+cat > /etc/crypttab.initramfs <<CRYPTTAB
+crypthome UUID=${HOME_LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
+cryptswap UUID=${SWAP_LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
+CRYPTTAB
 
 mkinitcpio -P
 
@@ -328,13 +337,8 @@ echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
 echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
 echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
 echo ""
-echo "    # crypttab — root, swap, and home (aconfmgr will overwrite this)"
-echo "    echo 'cryptroot UUID=\$(blkid -s UUID -o value ${ROOT_PART}) - password-echo=no,no-read-workqueue,no-write-workqueue' \\\\"
-echo "      > ~/.config/aconfmgr/files/etc/crypttab.initramfs"
-echo "    echo 'cryptswap UUID=\$(blkid -s UUID -o value ${SWAP_PART}) - password-echo=no,no-read-workqueue,no-write-workqueue' \\\\"
-echo "      >> ~/.config/aconfmgr/files/etc/crypttab.initramfs"
-echo "    echo 'crypthome UUID=\$(blkid -s UUID -o value ${HOME_PART}) - password-echo=no,no-read-workqueue,no-write-workqueue' \\\"
-echo " >>~/.config/aconfmgr/files/etc/crypttab.initramfs"
+echo "    # crypttab.initramfs — home + swap entries were already written during install"
+echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
 echo ""
 echo " # arch.conf — update LUKS UUID for this install"
 echo "    sed -i 's/rd.luks.name=[^ ]*/rd.luks.name='\$(blkid -s UUID -o value ${ROOT_PART})'=cryptroot/' \\"

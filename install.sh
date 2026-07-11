@@ -241,18 +241,22 @@ sed -i '/\/boot/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
 # ---------------------------------------------------------------------------
 # Keyfiles for home/swap auto-unlock
 # ---------------------------------------------------------------------------
-# Root stays passphrase-only (prompted via rd.luks.name in the initramfs).
-# home/swap get a random keyfile each, added as an extra LUKS key slot and
-# stored under /etc on the root filesystem — readable only once root itself
-# is decrypted, so /etc/crypttab can unlock them with no further prompts.
+# Root stays passphrase-only (prompted via crypttab.initramfs in the initramfs).
+# home/swap get a random keyfile each, added as an EXTRA LUKS key slot
+# alongside the original passphrase slot (never removed) — so either the
+# keyfile or the passphrase unlocks them. Keyfiles are named <volume>.key in
+# /etc/cryptsetup-keys.d/ on the root filesystem: this is crypttab(5)'s
+# documented auto-discovery convention, so leaving the crypttab key-file
+# field as "-" tries the keyfile first and explicitly falls back to an
+# interactive passphrase prompt if the keyfile is ever missing/unreadable.
 echo "==> Generating keyfiles for home/swap auto-unlock"
 install -d -m 700 /mnt/etc/cryptsetup-keys.d
-dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/home.key bs=512 count=1 status=none
-dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/swap.key bs=512 count=1 status=none
-chmod 600 /mnt/etc/cryptsetup-keys.d/home.key /mnt/etc/cryptsetup-keys.d/swap.key
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/crypthome.key bs=512 count=1 status=none
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/cryptswap.key bs=512 count=1 status=none
+chmod 600 /mnt/etc/cryptsetup-keys.d/crypthome.key /mnt/etc/cryptsetup-keys.d/cryptswap.key
 
-echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$HOME_PART" /mnt/etc/cryptsetup-keys.d/home.key
-echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$SWAP_PART" /mnt/etc/cryptsetup-keys.d/swap.key
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$HOME_PART" /mnt/etc/cryptsetup-keys.d/crypthome.key
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$SWAP_PART" /mnt/etc/cryptsetup-keys.d/cryptswap.key
 
 # ---------------------------------------------------------------------------
 # chroot configuration
@@ -294,11 +298,13 @@ cat > /etc/crypttab.initramfs <<CRYPTTAB
 cryptroot UUID=${LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
 CRYPTTAB
 
-# home/swap unlock automatically via keyfile once real root is mounted,
-# via the regular (non-initramfs) systemd instance — see /etc/cryptsetup-keys.d.
+# home/swap unlock automatically via keyfile once real root is mounted, via
+# the regular (non-initramfs) systemd instance. "-" triggers crypttab(5)'s
+# auto-discovery of /etc/cryptsetup-keys.d/<name>.key; falls back to an
+# interactive passphrase prompt if that keyfile is ever missing/unreadable.
 cat > /etc/crypttab <<CRYPTTAB
-crypthome UUID=${HOME_LUKS_UUID} /etc/cryptsetup-keys.d/home.key
-cryptswap UUID=${SWAP_LUKS_UUID} /etc/cryptsetup-keys.d/swap.key
+crypthome UUID=${HOME_LUKS_UUID} -
+cryptswap UUID=${SWAP_LUKS_UUID} -
 CRYPTTAB
 chmod 600 /etc/crypttab.initramfs /etc/crypttab
 
@@ -377,7 +383,7 @@ echo "    # just copy them in as-is (no UUID templating needed; arch.conf has no
 echo "    mkdir -p ~/.config/aconfmgr/files/etc/cryptsetup-keys.d"
 echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
 echo "    cp /etc/crypttab ~/.config/aconfmgr/files/etc/crypttab"
-echo "    cp /etc/cryptsetup-keys.d/home.key /etc/cryptsetup-keys.d/swap.key ~/.config/aconfmgr/files/etc/cryptsetup-keys.d/"
+echo "    cp /etc/cryptsetup-keys.d/crypthome.key /etc/cryptsetup-keys.d/cryptswap.key ~/.config/aconfmgr/files/etc/cryptsetup-keys.d/"
 echo ""
 echo "    cd ~/.config/aconfmgr && git add -A && git commit -m 'sync for fresh install'"
 echo "    aconfmgr apply"

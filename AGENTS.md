@@ -21,11 +21,11 @@ All sizes are config variables at the top. `/home` is elastic via sgdisk negativ
 
 Key traits:
 - Disk-agnostic: derives `p`-vs-no-`p` suffix from whether `$DISK` ends in a digit
-- Same LUKS passphrase for all three data volumes. All three unlock via `rd.luks.name=<UUID>=<name>` on the kernel cmdline (one param per device: cryptroot, crypthome, cryptswap) — a single proven mechanism, not split across kernel params + `/etc/crypttab.initramfs`. All three are processed in the same initrd systemd session, so kernel-keyring password caching can skip re-prompting for the repeat entries
+- Only root is passphrase-prompted, via `rd.luks.name=<UUID>=cryptroot` on the kernel cmdline. home/swap are LUKS2 too, but unlock automatically: each gets a random keyfile (`dd if=/dev/urandom`) added as an extra key slot via `cryptsetup luksAddKey`, stored under `/etc/cryptsetup-keys.d/` on the root filesystem (mode 700 dir, 600 files), referenced from a plain `/etc/crypttab` (not `.initramfs`) — processed by the normal systemd instance once root is already decrypted and mounted, so the keyfiles are only ever readable after the passphrase has unlocked root
 - `bootctl --esp-path=/boot install` (single ESP, no XBOOTLDR)
 - No `resume=` in arch.conf (suspend-only, no hibernation)
 - No ISO boot entry section (removed on rewrite)
-- blkid guarded for all three LUKS UUIDs (root/home/swap) — an empty UUID would silently produce a broken `rd.luks.name=` param and home/swap would never unlock, with no error at install time
+- blkid guarded for all three LUKS UUIDs (root/home/swap) — an empty UUID would silently produce a broken `rd.luks.name=` param or crypttab entry, with no error at install time
 
 ### install-vm.sh (VM testing)
 
@@ -69,7 +69,8 @@ The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific file
 | `/etc/fstab` | New UUIDs, swap partition instead of old swapfile | `cp /etc/fstab` |
 | `/etc/machine-id` | Must be unique per install | `cp /etc/machine-id` |
 | `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` | New UIDs and password hashes | `cp /etc/{passwd,shadow,group,gshadow}` |
-| `/boot/loader/entries/arch.conf` | LUKS UUIDs (root always; home + swap too on install.sh) | `sed` each `rd.luks.name=...=<name>` param by name |
+| `/boot/loader/entries/arch.conf` | Root LUKS UUID | `sed` the `rd.luks.name=...=cryptroot` param |
+| `/etc/crypttab`, `/etc/cryptsetup-keys.d/*.key` | install.sh only — home/swap unlock keys, sensitive (same trust level as shadow) | `cp` as-is, no templating needed (already correct for this install) |
 
 aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the rest of `arch.conf` (nvidia kernel params) — these are fine to overwrite since aconfmgr installs nvidia packages first.
 

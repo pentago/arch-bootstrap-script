@@ -239,6 +239,22 @@ fi
 sed -i '/\/boot/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
 
 # ---------------------------------------------------------------------------
+# Keyfiles for home/swap auto-unlock
+# ---------------------------------------------------------------------------
+# Root stays passphrase-only (prompted via rd.luks.name in the initramfs).
+# home/swap get a random keyfile each, added as an extra LUKS key slot and
+# stored under /etc on the root filesystem — readable only once root itself
+# is decrypted, so /etc/crypttab can unlock them with no further prompts.
+echo "==> Generating keyfiles for home/swap auto-unlock"
+install -d -m 700 /mnt/etc/cryptsetup-keys.d
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/home.key bs=512 count=1 status=none
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/swap.key bs=512 count=1 status=none
+chmod 600 /mnt/etc/cryptsetup-keys.d/home.key /mnt/etc/cryptsetup-keys.d/swap.key
+
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$HOME_PART" /mnt/etc/cryptsetup-keys.d/home.key
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$SWAP_PART" /mnt/etc/cryptsetup-keys.d/swap.key
+
+# ---------------------------------------------------------------------------
 # chroot configuration
 # ---------------------------------------------------------------------------
 echo "==> Configuring system in chroot"
@@ -271,6 +287,14 @@ MKINIT
 
 mkinitcpio -P
 
+# home/swap unlock automatically via keyfile once root is mounted (see
+# /etc/cryptsetup-keys.d) — no separate prompt, no initramfs involvement.
+cat > /etc/crypttab <<CRYPTTAB
+crypthome UUID=${HOME_LUKS_UUID} /etc/cryptsetup-keys.d/home.key
+cryptswap UUID=${SWAP_LUKS_UUID} /etc/cryptsetup-keys.d/swap.key
+CRYPTTAB
+chmod 600 /etc/crypttab
+
 bootctl --esp-path=/boot install
 
 cat > /boot/loader/loader.conf <<'LOADER'
@@ -285,7 +309,7 @@ title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} rd.luks.name=${HOME_LUKS_UUID}=crypthome rd.luks.name=${SWAP_LUKS_UUID}=cryptswap root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
+options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
 EOF
 
 systemctl enable NetworkManager
@@ -338,13 +362,15 @@ echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
 echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
 echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
 echo ""
-echo "    # arch.conf — update the root/home/swap LUKS UUIDs for this install"
+echo "    # arch.conf — update the root LUKS UUID for this install"
 echo "    sed -i \"s|rd.luks.name=[^=]*=cryptroot|rd.luks.name=\$(blkid -s UUID -o value ${ROOT_PART})=cryptroot|\" \\"
 echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
-echo "    sed -i \"s|rd.luks.name=[^=]*=crypthome|rd.luks.name=\$(blkid -s UUID -o value ${HOME_PART})=crypthome|\" \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
-echo "    sed -i \"s|rd.luks.name=[^=]*=cryptswap|rd.luks.name=\$(blkid -s UUID -o value ${SWAP_PART})=cryptswap|\" \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
+echo ""
+echo "    # crypttab + keyfiles for home/swap — sensitive, same trust level as /etc/shadow above."
+echo "    # Already correct for this install, just copy them in as-is (no UUID templating needed)."
+echo "    mkdir -p ~/.config/aconfmgr/files/etc/cryptsetup-keys.d"
+echo "    cp /etc/crypttab ~/.config/aconfmgr/files/etc/crypttab"
+echo "    cp /etc/cryptsetup-keys.d/home.key /etc/cryptsetup-keys.d/swap.key ~/.config/aconfmgr/files/etc/cryptsetup-keys.d/"
 echo ""
 echo "    cd ~/.config/aconfmgr && git add -A && git commit -m 'sync for fresh install'"
 echo "    aconfmgr apply"

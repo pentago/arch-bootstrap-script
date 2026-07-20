@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Arch Linux install script — custom partitions variant
+# Arch Linux install script — whole-disk wipe variant (boot, root, swap, home)
 #
 # Partition layout (whole disk, no Windows):
 #   p1  — BOOT_SIZE  EFI System Partition (FAT32, label BOOT) → /boot
@@ -15,7 +15,7 @@
 # Whole-disk wipe, no dual-boot handling — set DISK below.
 #
 # Usage: boot from Arch ISO, then:
-#   curl -LO <url>/install-custom.sh && chmod +x install-custom.sh && ./install-custom.sh
+#   curl -LO <url>/install-wipe-all.sh && chmod +x install-wipe-all.sh && ./install-wipe-all.sh
 #
 set -euo pipefail
 

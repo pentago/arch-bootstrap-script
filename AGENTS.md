@@ -2,14 +2,15 @@
 
 ## Purpose
 
-Scripts to automate Arch Linux installation up to the point where `aconfmgr apply` takes over full system configuration. Both drop an Arch ISO recovery boot entry into `/boot` as their final step.
+Scripts to automate Arch Linux installation up to the point where `aconfmgr apply` takes over full system configuration. All drop an Arch ISO recovery boot entry into `/boot` as their final step.
 
-- `install.sh` — Custom partitions variant (whole disk wipe, disk-agnostic, LUKS on root/swap/home)
+- `install-wipe-all.sh` — Whole-disk wipe variant (boot, root, swap, home — all partitions recreated)
+- `install-keep-home.sh` — Reinstall variant (preserves /home partition, wipes boot/root/swap only)
 - `install-vm.sh` — VM test variant (whole disk wipe, /dev/vda, plain swap, sshd enabled)
 
 ## Scripts
 
-### install.sh (custom partitions)
+### install-wipe-all.sh (whole-disk wipe)
 
 Partition layout (whole disk, no Windows):
 - p1: `BOOT_SIZE` ESP (FAT32) → `/boot` (single partition, no XBOOTLDR split)
@@ -60,13 +61,13 @@ Key traits:
 - **paru built from source** — `paru-bin` links against specific `libalpm.so` version that mismatches on newer ISOs. `rust` is in PKGS for this reason.
 - **aconfmgr-git is NOT installed by the script** — only paru itself gets built/installed. Installing aconfmgr-git via paru needs sudo, which needs a real password prompt; that kept failing to read `${USER_NAME}`'s password reliably from inside `arch-chroot` in this environment (even run directly, outside any heredoc — see git history for the two failed attempts). Post-install instructions tell the user to run `paru -S aconfmgr-git` themselves after first login, where an interactive sudo prompt actually works.
 - **Interactive commands outside heredocs** — `passwd`, `makepkg -si`, and anything needing stdin must run as separate `arch-chroot` calls, not inside `<<HEREDOC` blocks.
-- **Pre-partition cleanup** — both scripts swapoff, umount `/mnt`, and close any open LUKS before partitioning, so they can be re-run safely.
+- **Pre-partition cleanup** — all scripts swapoff, umount `/mnt`, and close any open LUKS before partitioning, so they can be re-run safely.
 - **ISO boot entry outside chroot** — the Arch ISO download, extraction, and boot entry creation operate on `/mnt/boot/` directly from the live environment, not inside a chroot heredoc.
 - **blkid guarded** — UUID extraction aborts with a clear error if blkid returns empty (both scripts).
 
 ## aconfmgr integration
 
-The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific files that must be updated after a fresh install before running `aconfmgr apply`. Both scripts print the exact commands in their post-install output.
+The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific files that must be updated after a fresh install before running `aconfmgr apply`. All scripts print the exact commands in their post-install output.
 
 | File | Why | How |
 |------|-----|-----|
@@ -74,8 +75,8 @@ The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific file
 | `/etc/machine-id` | Must be unique per install | `cp /etc/machine-id` |
 | `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` | New UIDs and password hashes | `cp /etc/{passwd,shadow,group,gshadow}` |
 | `/boot/loader/entries/arch.conf` | install-vm.sh only — root LUKS UUID (+ resume UUID for hibernation) | `sed` the `rd.luks.name=...=cryptroot` and `resume=UUID=` params |
-| `/etc/crypttab.initramfs` | install.sh only — root LUKS UUID (arch.conf carries no LUKS params there) | `cp` as-is, then `mkinitcpio -P` to re-embed |
-| `/etc/crypttab`, `/etc/cryptsetup-keys.d/*.key` | install.sh only — home/swap unlock keys, sensitive (same trust level as shadow) | `cp` as-is, no templating needed (already correct for this install) |
+| `/etc/crypttab.initramfs` | install-wipe-all.sh / install-keep-home.sh — root LUKS UUID (arch.conf carries no LUKS params there) | `cp` as-is, then `mkinitcpio -P` to re-embed |
+| `/etc/crypttab`, `/etc/cryptsetup-keys.d/*.key` | install-wipe-all.sh / install-keep-home.sh — home/swap unlock keys, sensitive (same trust level as shadow) | `cp` as-is, no templating needed (already correct for this install) |
 
 aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the rest of `arch.conf` (nvidia kernel params) — these are fine to overwrite since aconfmgr installs nvidia packages first.
 
@@ -84,4 +85,4 @@ aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the 
 - These scripts run from a live Arch ISO as root. They will never be linted or type-checked.
 - Section divider comments are intentional — the scripts are read linearly during a manual install.
 - Test changes by reading the script, not by running it (destructive).
-- Keep both scripts in sync for shared logic (LUKS setup, mkinitcpio hooks, bootctl flags, fstab fixups, chroot config, paru install, post-install instructions).
+- Keep scripts in sync for shared logic (LUKS setup, mkinitcpio hooks, bootctl flags, fstab fixups, chroot config, paru install, post-install instructions).

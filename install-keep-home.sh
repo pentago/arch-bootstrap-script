@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+#
+# Arch Linux install script — reinstall variant (preserves /home partition)
+#
+# Partition layout (whole disk, no Windows):
+#   p1  — BOOT_SIZE  EFI System Partition (FAT32, label BOOT) → /boot
+#   p2  — ROOT_SIZE  LUKS2 → ext4 (label ROOT)                 → /
+#   p3  — SWAP_SIZE  LUKS2 → swap                                → swap
+#   p4  — rest minus SWAP_SIZE  LUKS2 → ext4 (label HOME)       → /home (PRESERVED)
+#
+# Bootloader: systemd-boot (single ESP at p1, doubles as /boot — no XBOOTLDR)
+# Encryption: LUKS2 aes-xts-plain64 on root, swap, and /home (same passphrase)
+# initramfs:  systemd-based hooks (sd-encrypt, sd-vconsole)
+#
+# Wipes boot/root/swap only — home partition preserved.
+#
+# Usage: boot from Arch ISO, then:
+#   curl -LO <url>/install-keep-home.sh && chmod +x install-keep-home.sh && ./install-keep-home.sh
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+DISK=/dev/nvme0n1
+
+BOOT_SIZE=5G
+ROOT_SIZE=150G
+SWAP_SIZE=20G
+# /home is NOT created by this script — it must already exist as a LUKS2 partition.
+
+CRYPT_NAME=cryptroot
+HOSTNAME=workstation
+TIMEZONE=Europe/Belgrade
+LOCALE=en_US.UTF-8
+VCONSOLE_FONT=ter-132n
+USER_NAME=dzhi
+USER_SHELL=/bin/zsh
+
+EXTRA_CMDLINE=""
+
+PKGS=(
+  base
+  base-devel
+  linux
+  linux-headers
+  linux-firmware
+  amd-ucode
+  dosfstools
+  efibootmgr
+  gptfdisk
+  cryptsetup
+  networkmanager
+  terminus-font
+  openssh
+  sudo
+  atuin
+  bat
+  btop
+  direnv
+  fd
+  fzf
+  git
+  lazygit
+  neovim
+  ripgrep
+  rust
+  tmux
+  yazi
+  zoxide
+  zsh
+  7zip
+  ntfs-3g
+)
+
+# Partition suffix differs between disk naming schemes (nvme0n1p1 vs sda1).
+if [[ "$DISK" =~ [0-9]$ ]]; then
+  PART_PREFIX="p"
+else
+  PART_PREFIX=""
+fi
+BOOT_PART="${DISK}${PART_PREFIX}1"
+ROOT_PART="${DISK}${PART_PREFIX}2"
+SWAP_PART="${DISK}${PART_PREFIX}3"
+HOME_PART="${DISK}${PART_PREFIX}4"
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+echo "==> Preflight checks"
+
+[[ -d /sys/firmware/efi ]] || {
+  echo "ERROR: Not booted in UEFI mode"
+  exit 1
+}
+[[ -b "$DISK" ]] || {
+  echo "ERROR: Disk $DISK not found"
+  exit 1
+}
+[[ $(id -u) -eq 0 ]] || {
+  echo "ERROR: Run as root"
+  exit 1
+}
+
+# Verify home partition exists and is LUKS
+[[ -b "$HOME_PART" ]] || {
+  echo "ERROR: Home partition $HOME_PART not found — cannot preserve home"
+  exit 1
+}
+blkid -s TYPE -o value "$HOME_PART" | grep -q LUKS || {
+  echo "ERROR: $HOME_PART is not a LUKS partition — cannot preserve home"
+  exit 1
+}
+
+echo ""
+echo "This will WIPE $DISK except for the home partition (p4):"
+echo "  p1: ${BOOT_SIZE} boot (ESP) — RECREATED"
+echo "  p2: ${ROOT_SIZE} → LUKS2 → ext4 root — RECREATED"
+echo "  p3: ${SWAP_SIZE} swap — RECREATED"
+echo "  p4: home partition — PRESERVED (existing LUKS, existing data)"
+echo ""
+read -rp "Type YES to continue: " confirm
+[[ "$confirm" == "YES" ]] || {
+  echo "Aborted."
+  exit 1
+}
+
+read -rsp "LUKS passphrase: " LUKS_PASS
+echo
+read -rsp "LUKS passphrase (confirm): " LUKS_PASS2
+echo
+[[ "$LUKS_PASS" == "$LUKS_PASS2" ]] || {
+  echo "ERROR: LUKS passphrases do not match"
+  exit 1
+}
+
+read -rsp "Root password: " ROOT_PASS
+echo
+read -rsp "Root password (confirm): " ROOT_PASS2
+echo
+[[ "$ROOT_PASS" == "$ROOT_PASS2" ]] || {
+  echo "ERROR: Root passwords do not match"
+  exit 1
+}
+
+read -rsp "Password for ${USER_NAME}: " USER_PASS
+echo
+read -rsp "Password for ${USER_NAME} (confirm): " USER_PASS2
+echo
+[[ "$USER_PASS" == "$USER_PASS2" ]] || {
+  echo "ERROR: User passwords do not match"
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Time sync (needed for pacman signature verification)
+# ---------------------------------------------------------------------------
+echo "==> Syncing time"
+timedatectl set-ntp true
+
+# ---------------------------------------------------------------------------
+# Partitioning
+# ---------------------------------------------------------------------------
+echo "==> Partitioning $DISK"
+
+swapoff -a 2>/dev/null || true
+umount -R /mnt 2>/dev/null || true
+umount /tmp/archiso 2>/dev/null || true
+cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
+cryptsetup close cryptswap 2>/dev/null || true
+cryptsetup close crypthome 2>/dev/null || true
+
+# Delete only boot, root, swap — leave home untouched
+sgdisk --delete=1 "$DISK"
+sgdisk --delete=2 "$DISK"
+sgdisk --delete=3 "$DISK"
+
+sgdisk \
+  -n 1:0:+${BOOT_SIZE} -t 1:ef00 -c 1:"EFI system partition" \
+  -n 2:0:+${ROOT_SIZE} -t 2:8300 -c 2:"Linux root" \
+  -n 3:0:+${SWAP_SIZE} -t 3:8200 -c 3:"Linux swap" \
+  "$DISK"
+
+partprobe "$DISK"
+udevadm settle
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+echo "==> Formatting partitions"
+
+mkfs.fat -F32 -n BOOT "$BOOT_PART"
+
+echo "==> Setting up LUKS encryption on $ROOT_PART"
+echo -n "$LUKS_PASS" | cryptsetup luksFormat --batch-mode --type luks2 \
+  --cipher aes-xts-plain64 \
+  --key-size 512 \
+  --pbkdf argon2id \
+  "$ROOT_PART"
+
+echo -n "$LUKS_PASS" | cryptsetup open "$ROOT_PART" "$CRYPT_NAME"
+
+mkfs.ext4 -L ROOT "/dev/mapper/${CRYPT_NAME}"
+
+echo "==> Setting up LUKS encryption on $SWAP_PART"
+echo -n "$LUKS_PASS" | cryptsetup luksFormat --batch-mode --type luks2 \
+  --cipher aes-xts-plain64 \
+  --key-size 512 \
+  --use-random \
+  "$SWAP_PART"
+echo -n "$LUKS_PASS" | cryptsetup open "$SWAP_PART" cryptswap
+mkswap -L SWAP /dev/mapper/cryptswap
+swapon /dev/mapper/cryptswap
+
+echo "==> Opening existing home LUKS partition"
+echo -n "$LUKS_PASS" | cryptsetup open "$HOME_PART" crypthome
+
+# ---------------------------------------------------------------------------
+# Mount
+# ---------------------------------------------------------------------------
+echo "==> Mounting filesystems"
+
+mount "/dev/mapper/${CRYPT_NAME}" /mnt
+mount --mkdir "$BOOT_PART" /mnt/boot
+mount --mkdir /dev/mapper/crypthome /mnt/home
+
+# ---------------------------------------------------------------------------
+# Pacstrap
+# ---------------------------------------------------------------------------
+echo "==> Installing base system"
+
+pacstrap -K /mnt "${PKGS[@]}"
+
+# ---------------------------------------------------------------------------
+# fstab
+# ---------------------------------------------------------------------------
+echo "==> Generating fstab"
+genfstab -L /mnt >>/mnt/etc/fstab
+
+if ! grep -q '^LABEL=SWAP' /mnt/etc/fstab; then
+  echo "LABEL=SWAP          	none      	swap      	defaults  	0 0" >>/mnt/etc/fstab
+fi
+
+# Restrict ESP/boot permissions (holds kernels + bootloader)
+sed -i '/\/boot/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
+
+# ---------------------------------------------------------------------------
+# Keyfiles for home/swap auto-unlock
+# ---------------------------------------------------------------------------
+# Root stays passphrase-only (prompted via crypttab.initramfs in the initramfs).
+# home/swap get a random keyfile each, added as an EXTRA LUKS key slot
+# alongside the original passphrase slot (never removed) — so either the
+# keyfile or the passphrase unlocks them. Keyfiles are named <volume>.key in
+# /etc/cryptsetup-keys.d/ on the root filesystem: this is crypttab(5)'s
+# documented auto-discovery convention, so leaving the crypttab key-file
+# field as "-" tries the keyfile first and explicitly falls back to an
+# interactive passphrase prompt if the keyfile is ever missing/unreadable.
+echo "==> Generating keyfiles for home/swap auto-unlock"
+install -d -m 700 /mnt/etc/cryptsetup-keys.d
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/crypthome.key bs=512 count=1 status=none
+dd if=/dev/urandom of=/mnt/etc/cryptsetup-keys.d/cryptswap.key bs=512 count=1 status=none
+chmod 600 /mnt/etc/cryptsetup-keys.d/crypthome.key /mnt/etc/cryptsetup-keys.d/cryptswap.key
+
+# Home already has its original LUKS passphrase slot. We add this new
+# keyfile as an EXTRA slot — both the keyfile and the passphrase unlock it.
+# The old keyfile (from the wiped root) is gone, but the passphrase slot remains.
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$HOME_PART" /mnt/etc/cryptsetup-keys.d/crypthome.key
+echo -n "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$SWAP_PART" /mnt/etc/cryptsetup-keys.d/cryptswap.key
+
+# ---------------------------------------------------------------------------
+# chroot configuration
+# ---------------------------------------------------------------------------
+echo "==> Configuring system in chroot"
+
+LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+HOME_LUKS_UUID=$(blkid -s UUID -o value "$HOME_PART")
+SWAP_LUKS_UUID=$(blkid -s UUID -o value "$SWAP_PART")
+[[ -z "$LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $ROOT_PART"; exit 1; }
+[[ -z "$HOME_LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $HOME_PART"; exit 1; }
+[[ -z "$SWAP_LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $SWAP_PART"; exit 1; }
+
+arch-chroot /mnt /bin/bash -e <<CHROOT
+ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
+hwclock --systohc
+
+echo "${LOCALE} UTF-8" > /etc/locale.gen
+locale-gen
+echo "LANG=${LOCALE}" > /etc/locale.conf
+
+echo "FONT=${VCONSOLE_FONT}" > /etc/vconsole.conf
+
+echo "${HOSTNAME}" > /etc/hostname
+
+sed -i '/^HOOKS=/c\HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)' /etc/mkinitcpio.conf
+
+# Root unlocks in the initramfs: sd-encrypt embeds crypttab.initramfs as
+# /etc/crypttab inside the initramfs image, prompting for the passphrase
+# before switch-root. No rd.luks.name kernel param needed (and using one
+# here would make the generator ignore any crypttab entry not also named
+# on the cmdline — that's what silently broke home/swap unlock earlier).
+cat > /etc/crypttab.initramfs <<CRYPTTAB
+cryptroot UUID=${LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
+CRYPTTAB
+
+# home/swap unlock automatically via keyfile once real root is mounted, via
+# the regular (non-initramfs) systemd instance. "-" triggers crypttab(5)'s
+# auto-discovery of /etc/cryptsetup-keys.d/<name>.key; falls back to an
+# interactive passphrase prompt if that keyfile is ever missing/unreadable.
+cat > /etc/crypttab <<CRYPTTAB
+crypthome UUID=${HOME_LUKS_UUID} -
+cryptswap UUID=${SWAP_LUKS_UUID} -
+CRYPTTAB
+chmod 600 /etc/crypttab.initramfs /etc/crypttab
+
+mkinitcpio -P
+
+bootctl --esp-path=/boot install
+
+cat > /boot/loader/loader.conf <<'LOADER'
+default arch.conf
+timeout 5
+console-mode auto
+editor no
+LOADER
+
+cat > /boot/loader/entries/arch.conf <<EOF
+title Arch Linux
+linux /vmlinuz-linux
+initrd /amd-ucode.img
+initrd /initramfs-linux.img
+options root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
+EOF
+
+systemctl enable NetworkManager
+
+useradd -m -G wheel -s ${USER_SHELL} ${USER_NAME}
+
+mkdir -p /etc/sudoers.d
+echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
+chmod 0440 /etc/sudoers.d/wheel
+CHROOT
+
+echo "==> Setting root password"
+echo "root:${ROOT_PASS}" | arch-chroot /mnt chpasswd
+
+echo "==> Setting password for ${USER_NAME}"
+echo "${USER_NAME}:${USER_PASS}" | arch-chroot /mnt chpasswd
+
+echo "==> Installing paru"
+arch-chroot /mnt /usr/bin/bash -e <<PARU
+cd /tmp
+su - ${USER_NAME} -c 'cd /tmp && git clone https://aur.archlinux.org/paru.git && cd paru && makepkg --noconfirm'
+pacman -U --noconfirm /tmp/paru/paru-*.pkg.tar.zst
+rm -rf /tmp/paru
+PARU
+
+# ---------------------------------------------------------------------------
+# Done
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================="
+echo "  Installation complete!"
+echo "========================================="
+echo ""
+echo "Next steps:"
+echo "  1. umount -R /mnt"
+echo "  2. reboot"
+echo "  3. Log in as ${USER_NAME}"
+echo "  4. Install aconfmgr: paru -S aconfmgr-git"
+echo "  5. Clone your aconfmgr config: git clone <your-repo> ~/git/personal/aconfmgr"
+echo "  5a. ln -sf ~/git/personal/aconfmgr ~/.config/aconfmgr"
+echo ""
+echo "  Before running 'aconfmgr apply', sync machine-specific files into the repo:"
+echo ""
+echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
+echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
+echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
+echo ""
+echo "    # crypttab.initramfs (root), crypttab + keyfiles (home/swap) — sensitive,"
+echo "    # same trust level as /etc/shadow above. Already correct for this install,"
+echo "    # just copy them in as-is (no UUID templating needed; arch.conf has none)."
+echo "    mkdir -p ~/.config/aconfmgr/files/etc/cryptsetup-keys.d"
+echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
+echo "    cp /etc/crypttab ~/.config/aconfmgr/files/etc/crypttab"
+echo "    cp /etc/cryptsetup-keys.d/crypthome.key /etc/cryptsetup-keys.d/cryptswap.key ~/.config/aconfmgr/files/etc/cryptsetup-keys.d/"
+echo ""
+echo "    cd ~/.config/aconfmgr && git add -A && git commit -m 'sync for fresh install'"
+echo "    aconfmgr apply"
+echo ""
+echo "NOTE: Your /home partition (p4) was PRESERVED — all existing user data,"
+echo "      configs, and the original LUKS passphrase slot remain intact."
+echo "      A new keyfile was added as an extra LUKS key slot for auto-unlock."
+echo ""

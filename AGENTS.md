@@ -1,88 +1,94 @@
-# AGENTS.md
+# Repository Guidelines
 
-## Purpose
+## Project Overview
 
-Scripts to automate Arch Linux installation up to the point where `aconfmgr apply` takes over full system configuration. All drop an Arch ISO recovery boot entry into `/boot` as their final step.
+Bash scripts that install a barebones Arch Linux from a live Arch ISO (as root, UEFI only) up to the point where `aconfmgr apply` takes over full system configuration. Out of scope here: GPU drivers, desktop, extra kernel params, and everything else aconfmgr handles after first boot.
 
-- `install-wipe-all.sh` — Whole-disk wipe variant (boot, root, swap, home — all partitions recreated)
-- `install-keep-home.sh` — Reinstall variant (preserves /home partition, wipes boot/root/swap only)
-- `install-vm.sh` — VM test variant (whole disk wipe, /dev/vda, plain swap, sshd enabled)
+| Script | Disk | p1 ESP `/boot` | Root | Swap | `/home` | LUKS | ISO boot entry | sshd |
+|---|---|---|---|---|---|---|---|---|
+| `install-wipe-all.sh` | `/dev/nvme0n1` | 5G | p2 150G | p3 20G LUKS | p4 rest, LUKS | root/swap/home | no | no |
+| `install-keep-home.sh` | `/dev/nvme0n1` | 5G | p2 150G | p3 20G LUKS | p4 **kept** (must already be LUKS) | root/swap/home | no | no |
+| `install-vm.sh` | `/dev/vda` | 2G | p2 rest minus swap | p3 1G plain | — | root only | yes | yes, `PermitRootLogin yes` |
+| `install-vm-plain.sh` | `/dev/vda` | 512M | p2 rest, plain ext4 | — | — | none | no | yes, `PermitRootLogin yes` |
 
-## Scripts
+`README.md` is a symlink to this file.
 
-### install-wipe-all.sh (whole-disk wipe)
+## Architecture & Data Flow
 
-Partition layout (whole disk, no Windows):
-- p1: `BOOT_SIZE` ESP (FAT32) → `/boot` (single partition, no XBOOTLDR split)
-- p2: `ROOT_SIZE` LUKS2 → ext4 (label ROOT) → `/`
-- p3: `SWAP_SIZE` LUKS2 → swap
-- p4: remaining space (elastic, absorbs what's left) LUKS2 → ext4 (label HOME) → `/home`
+Every script is one linear file with `# ----` banner sections, run top to bottom:
 
-All sizes are config variables at the top. `/home` is elastic via sgdisk negative-size trick.
+```mermaid
+flowchart LR
+  A[Config vars] --> B[Preflight + YES + passwords] --> C[Cleanup + sgdisk] --> D[Format / LUKS] --> E[Mount + pacstrap -K] --> F[genfstab + ESP fmask] --> G["CHROOT heredoc"] --> H[chpasswd] --> I["PARU heredoc"] --> J["ISO entry (vm only)"] --> K[Post-install instructions]
+```
 
-Key traits:
-- Disk-agnostic: derives `p`-vs-no-`p` suffix from whether `$DISK` ends in a digit
-- Two-file crypttab split, matching the systemd-cryptsetup-generator boot stages:
-  - **root** → `/etc/crypttab.initramfs` (`cryptroot UUID=... -`), which `sd-encrypt` embeds into the initramfs image and unlocks before switch-root. This is the only passphrase prompt. No `rd.luks.name=`/`rd.luks.uuid=` on the kernel cmdline — setting one would flip the generator into allowlist mode, silently ignoring any crypttab entry not also named on the cmdline (this is what broke home/swap unlock during development; see git history)
-  - **home/swap** → plain `/etc/crypttab` (`crypthome UUID=... -`, `cryptswap UUID=... -`), processed by the regular systemd instance after switch-root (real root already mounted). Each gets a random keyfile (`dd if=/dev/urandom`) added as an *extra* LUKS key slot via `cryptsetup luksAddKey` — the original passphrase slot from `luksFormat` is never removed, so both the keyfile and the LUKS passphrase unlock either volume. Keyfiles are named `/etc/cryptsetup-keys.d/<volume-name>.key`, matching crypttab(5)'s documented auto-discovery convention (hence the `-` in the key-file field) — keyfile tried first (silent), falls back to an interactive passphrase prompt if it's ever missing/unreadable. Keyfiles live on the root filesystem, only readable once root itself is decrypted
-  - `arch.conf`'s kernel cmdline carries no LUKS-related params at all — just `root=LABEL=ROOT rw`
-- `bootctl --esp-path=/boot install` (single ESP, no XBOOTLDR)
-- No `resume=` in arch.conf (suspend-only, no hibernation)
-- No ISO boot entry section (removed on rewrite)
-- blkid guarded for all three LUKS UUIDs (root/home/swap) — an empty UUID would silently produce a broken crypttab entry, with no error at install time
+- **Values flow** from the top `Config` section into unquoted heredocs (`<<CHROOT`, `<<PARU`, `<<EOF`), so `${VAR}` is expanded on the **host** before entering the chroot. Use quoted delimiters (`<<'LOADER'`) only for static content.
+- **Boot**: single ESP mounted at `/boot`, `bootctl --esp-path=/boot install`, no XBOOTLDR. `arch.conf` options are just `root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}`; no `resume=` (suspend only).
+- **initramfs**: systemd hooks, set with `sed -i '/^HOOKS=/c\...'` (never overwrite `mkinitcpio.conf`): `base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck` (vm-plain drops `sd-encrypt`).
+- **LUKS unlock design** (two boot stages of systemd-cryptsetup-generator):
+  - root → `/etc/crypttab.initramfs` (`cryptroot UUID=... - password-echo=no,...`), embedded by `sd-encrypt`; the only passphrase prompt.
+  - home/swap (wipe-all, keep-home) → `/etc/crypttab` with `-` key field; random 512-byte keyfiles at `/etc/cryptsetup-keys.d/<name>.key` added as an **extra** slot via `luksAddKey` (passphrase slot kept as fallback).
+  - **Never** put `rd.luks.name=`/`rd.luks.uuid=` on the cmdline: it flips the generator into allowlist mode and silently ignores other crypttab entries (broke home/swap unlock; see `e6b9dfd`, `7fb79a2`, `ceaccc9`).
+- **Handoff to aconfmgr**: post-install output tells the user to install `aconfmgr-git` via paru, clone their config to `~/git/personal/aconfmgr`, symlink to `~/.config/aconfmgr`, then copy machine-specific files in before `aconfmgr apply`:
 
-### install-vm.sh (VM testing)
+| File | Scripts | Why |
+|---|---|---|
+| `/etc/fstab`, `/etc/machine-id`, `/etc/{passwd,shadow,group,gshadow}` | all | new UUIDs, unique machine-id, new UIDs/hashes |
+| `/etc/crypttab.initramfs` | all except vm-plain | root LUKS UUID; re-embed with `mkinitcpio -P` |
+| `/etc/crypttab`, `/etc/cryptsetup-keys.d/*.key` | wipe-all, keep-home | home/swap keys; same sensitivity as `shadow` |
 
-Partition layout (vda, whole disk):
-- p1: 512M ESP → `/efi`
-- p2: 2G XBOOTLDR (FAT32, label BOOT) → `/boot`
-- p3: LUKS2 → ext4 (label ROOT) → `/`
-- p4: 1G plain swap (not LUKS-encrypted)
+aconfmgr later overwrites `mkinitcpio.conf` (nvidia, libfido2) and `arch.conf` (nvidia params); FIDO2 enrollment (`systemd-cryptenroll`) happens post-install, before the first apply.
 
-Key traits:
-- Separate ESP + XBOOTLDR (`bootctl --esp-path=/efi --boot-path=/boot`)
-- Plain swap with `mkswap -L SWAP` + `swapon` (no LUKS)
-- `resume=UUID=` in arch.conf (hibernation enabled)
-- blkid guarded: `[[ -z "$LUKS_UUID" ]] && { echo "ERROR: ..."; exit 1; }`
-- Enables sshd with `PermitRootLogin yes` for testing
-- Has Arch ISO boot entry section (download + extract + boot entry)
-- No YubiKey/FIDO2 instructions in post-install output
-- Needs 4G+ RAM for paru source build (LTO link is memory-hungry)
-- Post-install: single crypttab entry (root only), sed for both LUKS UUID and resume UUID
+## Key Directories
 
-## Design constraints
+Flat repo: four `install-*.sh` scripts at the root. `.omo/` is agent session state, not project content (no `.gitignore` exists; don't commit it).
 
-- **Barebones only** — no GPU drivers, no desktop, no extra kernel params. aconfmgr handles all of that post-boot.
-- **Config section at top** — all tunables (disk, sizes, user, locale, packages) live in variables at the top of the script. Don't scatter magic values.
-- **LUKS passphrase only** — FIDO2 enrollment happens post-install via systemd-cryptenroll, before first aconfmgr apply.
-- **Passwords collected upfront** — LUKS, root, and user passwords are read with confirmation at the start, then piped non-interactively to cryptsetup/chpasswd. Never use interactive `passwd` inside heredocs.
-- **initramfs uses systemd hooks** (`sd-encrypt`, `sd-vconsole`) not busybox (`encrypt`).
-- **sudoers via drop-in** (`/etc/sudoers.d/wheel`), never edit `/etc/sudoers` directly.
-- **paru built from source** — `paru-bin` links against specific `libalpm.so` version that mismatches on newer ISOs. `rust` is in PKGS for this reason.
-- **aconfmgr-git is NOT installed by the script** — only paru itself gets built/installed. Installing aconfmgr-git via paru needs sudo, which needs a real password prompt; that kept failing to read `${USER_NAME}`'s password reliably from inside `arch-chroot` in this environment (even run directly, outside any heredoc — see git history for the two failed attempts). Post-install instructions tell the user to run `paru -S aconfmgr-git` themselves after first login, where an interactive sudo prompt actually works.
-- **Interactive commands outside heredocs** — `passwd`, `makepkg -si`, and anything needing stdin must run as separate `arch-chroot` calls, not inside `<<HEREDOC` blocks.
-- **Pre-partition cleanup** — all scripts swapoff, umount `/mnt`, and close any open LUKS before partitioning, so they can be re-run safely.
-- **ISO boot entry outside chroot** — the Arch ISO download, extraction, and boot entry creation operate on `/mnt/boot/` directly from the live environment, not inside a chroot heredoc.
-- **blkid guarded** — UUID extraction aborts with a clear error if blkid returns empty (both scripts).
+## Development Commands
 
-## aconfmgr integration
+```bash
+# Syntax check (safe)
+for f in install-*.sh; do bash -n "$f" || echo "FAIL $f"; done
 
-The aconfmgr config (`~/.config/aconfmgr`) manages several machine-specific files that must be updated after a fresh install before running `aconfmgr apply`. All scripts print the exact commands in their post-install output.
+# Lint (safe; currently clean)
+shellcheck install-*.sh
 
-| File | Why | How |
-|------|-----|-----|
-| `/etc/fstab` | New UUIDs, swap partition instead of old swapfile | `cp /etc/fstab` |
-| `/etc/machine-id` | Must be unique per install | `cp /etc/machine-id` |
-| `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` | New UIDs and password hashes | `cp /etc/{passwd,shadow,group,gshadow}` |
-| `/boot/loader/entries/arch.conf` | install-vm.sh only — root LUKS UUID (+ resume UUID for hibernation) | `sed` the `rd.luks.name=...=cryptroot` and `resume=UUID=` params |
-| `/etc/crypttab.initramfs` | install-wipe-all.sh / install-keep-home.sh — root LUKS UUID (arch.conf carries no LUKS params there) | `cp` as-is, then `mkinitcpio -P` to re-embed |
-| `/etc/crypttab`, `/etc/cryptsetup-keys.d/*.key` | install-wipe-all.sh / install-keep-home.sh — home/swap unlock keys, sensitive (same trust level as shadow) | `cp` as-is, no templating needed (already correct for this install) |
+# Real run: ONLY in a throwaway UEFI VM with a virtio disk /dev/vda, booted from the Arch ISO
+curl -LO <url>/install-vm.sh && chmod +x install-vm.sh && ./install-vm.sh
+```
 
-aconfmgr also manages `/etc/mkinitcpio.conf` (nvidia modules, libfido2) and the rest of `arch.conf` (nvidia kernel params) — these are fine to overwrite since aconfmgr installs nvidia packages first.
+`shfmt` is not installed; if used, match the existing 2-space style (`shfmt -d -i 2`).
 
-## Editing rules
+## Code Conventions & Common Patterns
 
-- These scripts run from a live Arch ISO as root. They will never be linted or type-checked.
-- Section divider comments are intentional — the scripts are read linearly during a manual install.
-- Test changes by reading the script, not by running it (destructive).
-- Keep scripts in sync for shared logic (LUKS setup, mkinitcpio hooks, bootctl flags, fstab fixups, chroot config, paru install, post-install instructions).
+- `#!/usr/bin/env bash` + `set -euo pipefail`; 2-space indent; `# ----` section banners are intentional (scripts are read linearly during a manual install).
+- **All tunables in `Config`** at the top (`DISK`, `*_SIZE`, `HOSTNAME`, `TIMEZONE`, `LOCALE`, `VCONSOLE_FONT`, `USER_NAME`, `USER_SHELL`, `EXTRA_CMDLINE`, `PKGS`). No magic values further down.
+  - Gotcha: bash pre-sets `HOSTNAME`, so `set -u` won't catch a missing `HOSTNAME=` line; the system silently gets `archiso`.
+- **Partition suffix**: `PART_PREFIX="p"` when `$DISK` ends in a digit (`nvme0n1p1` vs `vda1`).
+- **Passwords collected upfront**: `read -rsp` twice + compare, then piped non-interactively (`echo -n "$LUKS_PASS" | cryptsetup ...`, `echo "user:pass" | arch-chroot /mnt chpasswd`).
+- **Heredoc stdin is consumed**: anything that prompts (`passwd`, `sudo`, `makepkg -si`, `paru -S`) can't run inside a heredoc. paru is built as `su - USER -c '... makepkg --noconfirm'` then installed with `pacman -U` as root. `aconfmgr-git` is deliberately a manual post-install step (sudo prompt in chroot failed twice; `5c369bd`).
+- **Re-runnable**: pre-partition cleanup with `|| true` (`swapoff -a`, `umount -R /mnt`, `umount /tmp/archiso`, `cryptsetup close ...`).
+- **Fail loud**: guard every `blkid` UUID: `[[ -z "$LUKS_UUID" ]] && { echo "ERROR: ..."; exit 1; }` (an empty UUID writes a silently broken crypttab).
+- ESP fstab entry tightened: `fmask=0077,dmask=0077`. sudo via `/etc/sudoers.d/wheel` (0440), never `/etc/sudoers`.
+- **Keep shared logic in sync** across scripts (mkinitcpio hooks, bootctl, fstab fixups, chroot config, paru build, post-install output); vm-plain intentionally lacks LUKS/swap/ISO pieces.
+- Known drift to clean up when touching it: chroot shell is `/bin/bash` vs `/usr/bin/bash` inconsistently between `CHROOT`/`PARU` heredocs; header comments in `install-wipe-all.sh:9`/`install-keep-home.sh:9` (p4 description) and `install-vm.sh:7` (`ROOT_SIZE`, which vm doesn't define) don't match the code; `install-vm.sh` closes `cryptswap`/`crypthome` it never creates (harmless).
+
+## Important Files
+
+- `install-wipe-all.sh` — primary bare-metal install (whole disk).
+- `install-keep-home.sh` — reinstall; preflight requires existing LUKS p4, `sgdisk --delete=1..3` and recreates p1–p3, re-adds home keyfile slot.
+- `install-vm.sh` — VM test of the LUKS path; also adds the Arch ISO recovery boot entry (download into `/mnt/boot`, `pacman-key -v`, loop-mount at `/tmp/archiso`, copy kernel/initrd, `archiso.conf` with `img_dev=/dev/disk/by-label/BOOT img_loop=...`), run from the host, not the chroot.
+- `install-vm-plain.sh` — minimal VM test: ESP + plain ext4 root (type 8304).
+
+## Runtime/Tooling Preferences
+
+- Runs only from a live Arch ISO: root, UEFI, network (pacstrap, AUR clone, ISO download; not pre-checked).
+- Tools: `sgdisk`, `cryptsetup` (LUKS2, aes-xts-plain64, 512-bit key; root uses `--pbkdf argon2id`), `pacstrap -K`, `genfstab -L`, `arch-chroot`, `bootctl`, `mkinitcpio`, `makepkg`.
+- paru is built from AUR source (`paru-bin` links a `libalpm.so` that mismatches newer ISOs), so `rust` is in `PKGS`; the LTO link needs 4G+ RAM (relevant for VMs).
+- `/boot` holding the ISO entry needs ≥2G (ISO is ~1.6G); `set -e` aborts at the very end otherwise.
+
+## Testing & QA
+
+- No tests, no CI, no lint config. Static checks: `bash -n` and `shellcheck` (both clean).
+- Never run `install-wipe-all.sh` / `install-keep-home.sh` outside a disposable VM: they erase disks. Otherwise review by reading.
+- Behavioral validation: `install-vm.sh` (LUKS root, swap, ISO entry) or `install-vm-plain.sh` (no LUKS) in a UEFI VM with ≥4G RAM; then reboot and confirm the passphrase prompt (vm), login, `paru --version`.
+- The VM scripts don't exercise home/swap keyfile unlock or keep-home's p4 preservation; those need a VM with an nvme-style or edited `DISK` and the bare-metal script.

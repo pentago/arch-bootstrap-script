@@ -3,12 +3,11 @@
 # Arch Linux install script — VM test variant
 #
 # Partition layout (whole disk, no Windows):
-#   p1     — 512M  EFI System Partition (FAT32)    → /efi
-#   p2     — 2G    XBOOTLDR (FAT32, label BOOT)   → /boot
-#   p3     — rest  LUKS2 → ext4 (label ROOT)       → /
-#   p4     — 1G    Linux swap                      → swap
+#   p1  — BOOT_SIZE  EFI System Partition (FAT32, label BOOT) → /boot
+#   p2  — ROOT_SIZE  LUKS2 → ext4 (label ROOT)                → /
+#   p3  — SWAP_SIZE  Linux swap                               → swap
 #
-# Bootloader: systemd-boot (ESP at p1 /efi, XBOOTLDR at p2 /boot)
+# Bootloader: systemd-boot (single ESP at p1, doubles as /boot — no XBOOTLDR)
 # Encryption: LUKS2 aes-xts-plain64 (passphrase only)
 # initramfs:  systemd-based hooks (sd-encrypt, sd-vconsole)
 #
@@ -18,22 +17,32 @@ set -euo pipefail
 # Config
 # ---------------------------------------------------------------------------
 DISK=/dev/vda
-ESP_PART="${DISK}1"
-BOOT_PART="${DISK}2"
-ROOT_PART="${DISK}3"
-SWAP_PART="${DISK}4"
-CRYPT_NAME=cryptroot
-ESP_SIZE=512M
+
 BOOT_SIZE=2G
 SWAP_SIZE=1G
+# Root gets remaining space after boot and swap are carved out.
+
+CRYPT_NAME=cryptroot
+
 HOSTNAME=archvm
 TIMEZONE=Europe/Belgrade
 LOCALE=en_US.UTF-8
 VCONSOLE_FONT=ter-132n
+
 USER_NAME=dzhi
 USER_SHELL=/bin/zsh
 
 EXTRA_CMDLINE=""
+
+# Partition suffix differs between disk naming schemes (vda1 vs nvme0n1p1).
+if [[ "$DISK" =~ [0-9]$ ]]; then
+  PART_PREFIX="p"
+else
+  PART_PREFIX=""
+fi
+BOOT_PART="${DISK}${PART_PREFIX}1"
+ROOT_PART="${DISK}${PART_PREFIX}2"
+SWAP_PART="${DISK}${PART_PREFIX}3"
 
 PKGS=(
   base
@@ -89,10 +98,9 @@ echo "==> Preflight checks"
 
 echo ""
 echo "This will WIPE $DISK entirely and create:"
-echo "  p1: ${ESP_SIZE} ESP"
-echo "  p2: ${BOOT_SIZE} boot (XBOOTLDR)"
-echo "  p3: remaining space → LUKS2 → ext4 root"
-echo "  p4: ${SWAP_SIZE} swap"
+echo "  p1: ${BOOT_SIZE} boot (ESP)"
+echo "  p2: remaining space → LUKS2 → ext4 root"
+echo "  p3: ${SWAP_SIZE} swap"
 echo ""
 read -rp "Type YES to continue: " confirm
 [[ "$confirm" == "YES" ]] || {
@@ -142,14 +150,15 @@ swapoff -a 2>/dev/null || true
 umount -R /mnt 2>/dev/null || true
 umount /tmp/archiso 2>/dev/null || true
 cryptsetup close "$CRYPT_NAME" 2>/dev/null || true
+cryptsetup close cryptswap 2>/dev/null || true
+cryptsetup close crypthome 2>/dev/null || true
 
 sgdisk -Z "$DISK"
 
 sgdisk \
-  -n 1:0:+${ESP_SIZE} -t 1:ef00 -c 1:"EFI system partition" \
-  -n 2:0:+${BOOT_SIZE} -t 2:ea00 -c 2:"Linux extended boot" \
-  -n 3:0:-${SWAP_SIZE} -t 3:8300 -c 3:"Linux filesystem" \
-  -n 4:0:0 -t 4:8200 -c 4:"Linux swap" \
+  -n 1:0:+${BOOT_SIZE} -t 1:ef00 -c 1:"EFI system partition" \
+  -n 2:0:-${SWAP_SIZE} -t 2:8300 -c 2:"Linux root" \
+  -n 3:0:0 -t 3:8200 -c 3:"Linux swap" \
   "$DISK"
 
 partprobe "$DISK"
@@ -159,8 +168,6 @@ udevadm settle
 # Formatting
 # ---------------------------------------------------------------------------
 echo "==> Formatting partitions"
-
-mkfs.fat -F32 "$ESP_PART"
 
 mkfs.fat -F32 -n BOOT "$BOOT_PART"
 
@@ -185,7 +192,6 @@ echo "==> Mounting filesystems"
 
 mount "/dev/mapper/${CRYPT_NAME}" /mnt
 mount --mkdir "$BOOT_PART" /mnt/boot
-mount --mkdir "$ESP_PART" /mnt/efi
 
 # ---------------------------------------------------------------------------
 # Pacstrap
@@ -204,7 +210,7 @@ if ! grep -q '^LABEL=SWAP' /mnt/etc/fstab; then
   echo "LABEL=SWAP          	none      	swap      	defaults  	0 0" >>/mnt/etc/fstab
 fi
 
-sed -i '/\/efi/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
+sed -i '/\/boot/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
 
 # ---------------------------------------------------------------------------
 # chroot configuration
@@ -212,11 +218,8 @@ sed -i '/\/efi/s/fmask=0022,dmask=0022/fmask=0077,dmask=0077/' /mnt/etc/fstab
 echo "==> Configuring system in chroot"
 
 LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
-SWAP_UUID=$(blkid -s UUID -o value "$SWAP_PART")
 [[ -z "$LUKS_UUID" ]] && { echo "ERROR: Failed to get LUKS UUID for $ROOT_PART"; exit 1; }
-[[ -z "$SWAP_UUID" ]] && { echo "ERROR: Failed to get swap UUID for $SWAP_PART"; exit 1; }
-
-arch-chroot /mnt /bin/bash -e <<CHROOT
+arch-chroot /mnt /usr/bin/bash -e <<CHROOT
 ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
 hwclock --systohc
 
@@ -230,9 +233,19 @@ echo "${HOSTNAME}" > /etc/hostname
 
 sed -i '/^HOOKS=/c\HOOKS=(base systemd autodetect microcode modconf keyboard keymap sd-vconsole block sd-encrypt filesystems fsck)' /etc/mkinitcpio.conf
 
+# Root unlocks in the initramfs: sd-encrypt embeds crypttab.initramfs as
+# /etc/crypttab inside the initramfs image, prompting for the passphrase
+# before switch-root. No rd.luks.name kernel param needed (and using one
+# here would make the generator ignore any crypttab entry not also named
+# on the cmdline — that's what silently broke home/swap unlock earlier).
+cat > /etc/crypttab.initramfs <<CRYPTTAB
+cryptroot UUID=${LUKS_UUID} - password-echo=no,no-read-workqueue,no-write-workqueue
+CRYPTTAB
+chmod 600 /etc/crypttab.initramfs
+
 mkinitcpio -P
 
-bootctl --esp-path=/efi --boot-path=/boot install
+bootctl --esp-path=/boot install
 
 cat > /boot/loader/loader.conf <<'LOADER'
 default arch.conf
@@ -246,7 +259,7 @@ title Arch Linux
 linux /vmlinuz-linux
 initrd /amd-ucode.img
 initrd /initramfs-linux.img
-options rd.luks.name=${LUKS_UUID}=${CRYPT_NAME} root=LABEL=ROOT rw resume=UUID=${SWAP_UUID}${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
+options root=LABEL=ROOT rw${EXTRA_CMDLINE:+ $EXTRA_CMDLINE}
 EOF
 
 systemctl enable NetworkManager sshd
@@ -318,17 +331,10 @@ echo "    cp /etc/machine-id ~/.config/aconfmgr/files/etc/machine-id"
 echo "    cp /etc/fstab ~/.config/aconfmgr/files/etc/fstab"
 echo "    cp /etc/{passwd,shadow,group,gshadow} ~/.config/aconfmgr/files/etc/"
 echo ""
-echo "    # crypttab — new LUKS UUID"
-echo "    echo 'cryptroot UUID=\$(blkid -s UUID -o value ${ROOT_PART}) - password-echo=no,no-read-workqueue,no-write-workqueue' \\"
-echo "      > ~/.config/aconfmgr/files/etc/crypttab.initramfs"
-echo ""
-echo "    # arch.conf — update LUKS UUID and resume UUID for this install"
-echo "    sed -i 's/rd.luks.name=[^ ]*/rd.luks.name='\$(blkid -s UUID -o value ${ROOT_PART})'=cryptroot/' \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
-echo "    sed -i 's/resume=UUID=[^ ]*/resume=UUID='\$(blkid -s UUID -o value ${SWAP_PART})'/' \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
-echo "    sed -i 's/ resume_offset=[^ ]*//' \\"
-echo "      ~/.config/aconfmgr/files/boot/loader/entries/arch.conf"
+echo "    # crypttab.initramfs (root) — sensitive, same trust level as /etc/shadow."
+echo "    # Already correct for this install, just copy it in as-is."
+echo "    cp /etc/crypttab.initramfs ~/.config/aconfmgr/files/etc/crypttab.initramfs"
+echo "    chmod 600 ~/.config/aconfmgr/files/etc/crypttab.initramfs"
 echo ""
 echo "    cd ~/.config/aconfmgr && git add -A && git commit -m 'sync for fresh install'"
 echo "    aconfmgr apply"
